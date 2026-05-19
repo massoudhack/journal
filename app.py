@@ -425,17 +425,16 @@ def tehran_to_utc(tehran_str):
     except: return None
 
 # ====================================================================
-# تابع اصلی بررسی کندل‌ها – اصلاح شده: فقط SL یا 3R باعث بسته شدن می‌شود
+# تابع اصلی بررسی کندل‌ها – اصلاح شده برای snapshot تا SL یا 3R
 # ====================================================================
 def check_sltp_hit_with_details(symbol, tf, entry_time_str, direction, entry_price, sl_price, tp_price, size=1.0, max_post_sl_pips=300, r3_override=None):
     """
-    بازگشت: (hit, hit_price, tp_hit, tp_hit_price, last_close, pnl, mfe_pip, mae_pip, candle_lines, found_3r,
+    بازگشت: (hit, hit_price, last_close, pnl, mfe_pip, mae_pip, candle_lines, found_3r,
              free_risk_was_possible, free_risk_saved, reached_1r_at, pullback_after_1r,
              post_sl_max_profit, post_sl_reached_1r, post_sl_reached_1_5r, post_sl_reached_2r, post_sl_reached_3r,
              mfe_before_sl, passed_1r, snapshot_bars)
-    * hit: 'sl' یا 'tp3' (None اگر هنوز بسته نشده)
-    * tp_hit: True اگر به TP رسیده باشد (حتی اگر بسته نشده)
-    * snapshot_bars: کندل‌ها تا آخرین برخورد با SL یا 3R
+    * hit: 'sl' / 'tp' / 'tp3' (اولین رویداد)
+    * snapshot_bars: کندل‌ها تا آخرین برخورد با SL یا 3R (حتی اگر TP زودتر خورده باشد)
     """
     try:
         tf_limits = {"1m":2000, "5m":1500, "15m":1000, "1h":700, "4h":500, "1d":300}
@@ -443,15 +442,15 @@ def check_sltp_hit_with_details(symbol, tf, entry_time_str, direction, entry_pri
         url = f"https://biquote.io/api/{symbol}/ohlc?interval={tf}&limit={bar_limit}"
         r = requests.get(url, timeout=12, headers=H)
         if r.status_code != 200:
-            return (None, None, False, None, None, None, None, None, [], False, False, False, None, False, None, False, False, False, False, 0.0, False, [])
+            return (None, None, None, None, None, None, None, False, False, False, None, False, None, None, None, None, None, 0.0, False, [])
         data = r.json()
         bars = data.get("bars") or data.get("data") or (data if isinstance(data, list) else [])
         if not bars:
-            return (None, None, False, None, None, None, None, None, [], False, False, False, None, False, None, False, False, False, False, 0.0, False, [])
+            return (None, None, None, None, None, None, None, False, False, False, None, False, None, None, None, None, None, 0.0, False, [])
 
         entry_utc = tehran_to_utc(entry_time_str)
         if not entry_utc:
-            return (None, None, False, None, None, None, None, None, [], False, False, False, None, False, None, False, False, False, False, 0.0, False, [])
+            return (None, None, None, None, None, None, None, False, False, False, None, False, None, None, None, None, None, 0.0, False, [])
 
         all_bars_sorted = []
         for b in bars:
@@ -474,13 +473,12 @@ def check_sltp_hit_with_details(symbol, tf, entry_time_str, direction, entry_pri
 
         after = all_bars_sorted[entry_bar_idx:]
         if not after:
-            return (None, None, False, None, None, None, None, None, [], False, False, False, None, False, None, False, False, False, False, 0.0, False, [])
+            return (None, None, None, None, None, None, None, False, False, False, None, False, None, None, None, None, None, 0.0, False, [])
 
         is_buy = (direction == "BUY")
-        hit = None          # 'sl' یا 'tp3'
+        hit = None
         hit_price = None
-        tp_hit = False
-        tp_hit_price = None
+        hit_idx = None
         mul = get_pip_multiplier(symbol)
         mfe_pip = 0.0
         mae_pip = 0.0
@@ -564,33 +562,26 @@ def check_sltp_hit_with_details(symbol, tf, entry_time_str, direction, entry_pri
             body_p = abs(close - open_) * mul
             candle_lines.append(f"{thr}: {dir_c} {body_p:.1f}pip | H:{high:.5f} L:{low:.5f} C:{close:.5f}")
 
-            # ===== تعیین برخورد با SL یا 3R (بسته شدن) =====
             if hit is None:
                 if is_buy:
                     if sl_price is not None and low <= sl_price:
-                        hit, hit_price = "sl", sl_price
+                        hit, hit_price, hit_idx = "sl", sl_price, i
                         sl_hit_occurred = True
+                    elif tp_price is not None and high >= tp_price:
+                        hit, hit_price, hit_idx = "tp", tp_price, i
                     elif _r3_price and high >= _r3_price:
-                        hit, hit_price = "tp3", _r3_price
+                        hit, hit_price, hit_idx = "tp3", _r3_price, i
                         found_3r = True
                 else:
                     if sl_price is not None and high >= sl_price:
-                        hit, hit_price = "sl", sl_price
+                        hit, hit_price, hit_idx = "sl", sl_price, i
                         sl_hit_occurred = True
+                    elif tp_price is not None and low <= tp_price:
+                        hit, hit_price, hit_idx = "tp", tp_price, i
                     elif _r3_price and low <= _r3_price:
-                        hit, hit_price = "tp3", _r3_price
+                        hit, hit_price, hit_idx = "tp3", _r3_price, i
                         found_3r = True
 
-            # ===== تعیین برخورد با TP (فقط برای ثبت، بدون بستن) =====
-            if not tp_hit and tp_price is not None:
-                if is_buy and high >= tp_price:
-                    tp_hit = True
-                    tp_hit_price = tp_price
-                elif not is_buy and low <= tp_price:
-                    tp_hit = True
-                    tp_hit_price = tp_price
-
-            # ===== تعیین پایان snapshot (فقط SL یا 3R) =====
             if not snap_resolved:
                 if is_buy:
                     if sl_price is not None and low <= sl_price:
@@ -609,7 +600,6 @@ def check_sltp_hit_with_details(symbol, tf, entry_time_str, direction, entry_pri
                 if not snap_resolved:
                     snap_end_idx = i
 
-            # برگشت بعد SL
             if sl_hit_occurred:
                 if is_buy:
                     if high > entry_price:
@@ -665,13 +655,13 @@ def check_sltp_hit_with_details(symbol, tf, entry_time_str, direction, entry_pri
                 "c": float(b_snap.get("close", 0)),
             })
 
-        return (hit, hit_price, tp_hit, tp_hit_price, last_close, pnl, mfe_pip, mae_pip, candle_lines, found_3r,
+        return (hit, hit_price, last_close, pnl, mfe_pip, mae_pip, candle_lines, found_3r,
                 free_risk_was_possible, free_risk_saved, reached_1r_at, pullback_after_1r,
                 post_sl_max_profit, post_sl_reached_1r, post_sl_reached_1_5r, post_sl_reached_2r, post_sl_reached_3r,
                 mfe_before_sl, passed_1r, snapshot_bars)
     except Exception as e:
         log_error(f"check_sltp_hit_with_details: {e}")
-        return (None, None, False, None, None, None, None, None, [], False, False, False, None, False, None, False, False, False, False, 0.0, False, [])
+        return (None, None, None, None, None, None, None, False, False, False, None, False, None, None, None, None, None, 0.0, False, [])
 
 def groq_analyze(prompt):
     if not GROQ_API_KEY:
@@ -864,24 +854,20 @@ def add_journal():
         "free_risk_was_possible": False, "free_risk_saved": False, "pullback_after_1r": False,
         "post_sl_max_profit": 0, "post_sl_reached_1r": False, "post_sl_reached_1_5r": False,
         "post_sl_reached_2r": False, "post_sl_reached_3r": False,
-        "mfe_before_sl_pip": 0, "passed_1r": False,
-        "tp_hit": False, "tp_hit_price": None
+        "mfe_before_sl_pip": 0, "passed_1r": False
     }
     try:
         res = check_sltp_hit_with_details(sym, trade["tf"], trade["entryTime"], direction, entry, sl_price, tp_price, size, r3_override=None)
-        (hit, hit_price, tp_hit, tp_hit_price, last_close, pnl, mfe_pip, mae_pip, candle_lines, found_3r,
+        (hit, hit_price, last_close, pnl, mfe_pip, mae_pip, candle_lines, found_3r,
          fr_possible, fr_saved, fr_at, pullback, post_max, post_1r, post_1_5r, post_2r, post_3r,
          mfe_before_sl, passed_1r, snapshot_bars) = res
 
-        trade["tp_hit"] = tp_hit
-        trade["tp_hit_price"] = tp_hit_price
-
-        if hit:  # 'sl' یا 'tp3'
+        if hit:
             trade["exit"] = hit_price
             trade["exitTime"] = now_teh()
-            trade["exitNote"] = f"خودکار: {'استاپ لاس' if hit=='sl' else '3R کامل'}"
+            trade["exitNote"] = f"خودکار: {'استاپ لاس' if hit=='sl' else ('تارگت' if hit=='tp' else '3R کامل')} در زمان ثبت"
             trade["pnl"] = round(pnl, 2) if pnl is not None else 0
-            trade["outcome"] = "win" if hit == "tp3" else "loss"
+            trade["outcome"] = "win" if hit in ["tp", "tp3"] else "loss"
             trade["exit_type"] = hit
             trade["status"] = "closed"
             trade["pending_check"] = False
@@ -900,15 +886,10 @@ def add_journal():
             trade["passed_1r"] = passed_1r
             trade["candle_snapshot"] = snapshot_bars
         else:
-            # هنوز بسته نشده (حتی اگر TP خورده باشد)
             trade["status"] = "open"
             trade["pending_check"] = True
             trade["candle_snapshot"] = snapshot_bars
             trade["last_poll"] = now_teh()
-            if tp_hit:
-                trade["exitNote"] = f"تارگت زده شد (در انتظار 3R یا SL)"
-            else:
-                trade["exitNote"] = None
     except Exception as e:
         log_error(f"auto check error: {e}")
         return jsonify({"ok": False, "error": f"خطا: {str(e)}"}), 500
@@ -917,7 +898,7 @@ def add_journal():
     return jsonify({"ok": True, "trade": trade})
 
 def calc_exit_type(outcome, risk_pips, mfe_pip, found_3r=False, exit_type_stored=None):
-    if exit_type_stored in ("sl", "tp3"):
+    if exit_type_stored in ("sl", "tp", "tp3"):
         return exit_type_stored
     if outcome == "loss":
         return "sl"
@@ -927,7 +908,7 @@ def calc_exit_type(outcome, risk_pips, mfe_pip, found_3r=False, exit_type_stored
         mfe_r = mfe_pip / risk_pips
         if mfe_r >= 3.0:
             return "tp3"
-    return "tp"  # برد ولی نرسیده به 3R
+    return "tp"
 
 @app.route("/api/journal/manual", methods=["POST"])
 def add_journal_manual():
@@ -963,23 +944,7 @@ def add_journal_manual():
     review_reversal_from_sl = body.get("review_reversal_from_sl")
     review_reversal_target_pips = body.get("review_reversal_target_pips")
     review_free_risk_saved = body.get("review_free_risk_saved", False)
-    is_crypto = is_crypto_symbol(sym)
-    risk_pips = None
-    if sl_price and entry:
-        if direction == "BUY":
-            risk_pips = (entry - sl_price) * mul
-        else:
-            risk_pips = (sl_price - entry) * mul
-    if is_crypto:
-        mfe_r = body.get("review_mfe_r")
-        mae_r = body.get("review_mae_r")
-        reversal_target_r = body.get("review_reversal_target_pips_r")
-        if mfe_r is not None and risk_pips and risk_pips > 0:
-            review_mfe = mfe_r * risk_pips
-        if mae_r is not None and risk_pips and risk_pips > 0:
-            review_mae = mae_r * risk_pips
-        if reversal_target_r is not None and risk_pips and risk_pips > 0:
-            review_reversal_target_pips = reversal_target_r * risk_pips
+
     trade = {
         "id": str(int(time.time() * 1000)), "sym": sym, "tf": tf,
         "direction": direction, "entry": entry, "size": size,
@@ -1002,11 +967,23 @@ def add_journal_manual():
         "pullback_after_1r": review_pullback,
         "post_sl_max_profit": 0, "post_sl_reached_1r": False, "post_sl_reached_1_5r": False,
         "post_sl_reached_2r": False, "post_sl_reached_3r": False,
-        "mfe_before_sl_pip": 0, "passed_1r": False, "candle_snapshot": [],
-        "tp_hit": False, "tp_hit_price": None
+        "mfe_before_sl_pip": 0, "passed_1r": False, "candle_snapshot": []
     }
-    mfe_for_calc = float(review_mfe) if review_mfe else 0
-    trade["exit_type"] = calc_exit_type(outcome, risk_pips, mfe_for_calc)
+    risk_pips = None
+    if sl_price and entry:
+        if direction == "BUY":
+            risk_pips = (entry - sl_price) * mul
+        else:
+            risk_pips = (sl_price - entry) * mul
+    # محاسبه passed_1r بر اساس review_mfe
+    if review_mfe is not None and risk_pips and risk_pips > 0:
+        trade["passed_1r"] = review_mfe >= risk_pips
+        trade["free_risk_was_possible"] = trade["passed_1r"]
+    if review_mfe is not None and review_mfe > 0:
+        trade["mfe_pip"] = review_mfe
+    if review_mae is not None:
+        trade["mae_pip"] = review_mae
+    trade["exit_type"] = calc_exit_type(outcome, risk_pips, review_mfe or 0)
     if trade.get("outcome") and not trade.get("candle_snapshot"):
         try:
             r3_guess = None
@@ -1020,7 +997,7 @@ def add_journal_manual():
                 tp_price if tp_price else r3_guess,
                 size, r3_override=r3_guess
             )
-            trade["candle_snapshot"] = res_snap[21] if len(res_snap) > 21 else []
+            trade["candle_snapshot"] = res_snap[19] if len(res_snap) > 19 else []
         except Exception as e:
             log_error(f"manual snapshot: {e}")
             trade["candle_snapshot"] = []
@@ -1049,15 +1026,18 @@ def edit_trade(tid):
     if trade.get("exit") and trade.get("entry"):
         diff = (trade["exit"] - trade["entry"]) if trade["direction"] == "BUY" else (trade["entry"] - trade["exit"])
         trade["pnl"] = diff * 1.0
+    # بازمحاسبه passed_1r بر اساس review_mfe
+    risk_pips = None
+    if trade.get("sl_price") and trade.get("entry"):
+        if trade["direction"] == "BUY":
+            risk_pips = (trade["entry"] - trade["sl_price"]) * mul
+        else:
+            risk_pips = (trade["sl_price"] - trade["entry"]) * mul
+    if trade.get("review_mfe") is not None and risk_pips and risk_pips > 0:
+        trade["passed_1r"] = trade["review_mfe"] >= risk_pips
+        trade["free_risk_was_possible"] = trade["passed_1r"]
     save_journal(journal)
     return jsonify({"ok": True, "trade": trade})
-
-@app.route("/api/journal/<tid>/delete", methods=["DELETE"])
-def delete_trade(tid):
-    journal = load_journal()
-    journal = [t for t in journal if t["id"] != tid]
-    save_journal(journal)
-    return jsonify({"ok": True})
 
 @app.route("/api/journal/<tid>/review", methods=["POST"])
 def review_trade(tid):
@@ -1071,27 +1051,20 @@ def review_trade(tid):
     entry = float(trade.get("entry", 0))
     sl_px = trade.get("sl_price")
     risk_pips = abs(entry - float(sl_px)) * mul if sl_px and entry else None
-    if "review_mfe" in body:
-        mfe_val = body["review_mfe"]
-        if mfe_val is not None and is_crypto_symbol(sym) and risk_pips and risk_pips > 0:
-            trade["review_mfe"] = round(float(mfe_val) * risk_pips, 4)
-        else:
-            trade["review_mfe"] = mfe_val
-    if "review_mae" in body:
-        mae_val = body["review_mae"]
-        if mae_val is not None and is_crypto_symbol(sym) and risk_pips and risk_pips > 0:
-            trade["review_mae"] = round(float(mae_val) * risk_pips, 4)
-        else:
-            trade["review_mae"] = mae_val
-    if "review_reversal_target_pips" in body:
-        rt_val = body["review_reversal_target_pips"]
-        if rt_val is not None and is_crypto_symbol(sym) and risk_pips and risk_pips > 0:
-            trade["review_reversal_target_pips"] = round(float(rt_val) * risk_pips, 4)
-        else:
-            trade["review_reversal_target_pips"] = rt_val
-    for f in ["review_pullback","review_note","review_reversal_occurred","review_reversal_from_sl","review_free_risk_saved"]:
+    # ذخیره مستقیم مقادیر (همیشه بر حسب پیپ)
+    for f in ["review_mfe","review_mae","review_reversal_from_sl","review_reversal_target_pips"]:
         if f in body:
             trade[f] = body[f]
+    for f in ["review_pullback","review_note","review_reversal_occurred","review_free_risk_saved"]:
+        if f in body:
+            trade[f] = body[f]
+    # بازمحاسبه passed_1r و free_risk_was_possible بر اساس review_mfe
+    if trade.get("review_mfe") is not None and risk_pips and risk_pips > 0:
+        trade["passed_1r"] = trade["review_mfe"] >= risk_pips
+        trade["free_risk_was_possible"] = trade["passed_1r"]
+        trade["mfe_pip"] = trade["review_mfe"]  # همگام‌سازی
+    if trade.get("review_mae") is not None:
+        trade["mae_pip"] = trade["review_mae"]
     save_journal(journal)
     return jsonify({"ok": True})
 
@@ -1126,7 +1099,7 @@ def analyze_trade(trade_id):
     rev_occurred = trade.get("review_reversal_occurred", False)
     rev_target = trade.get("review_reversal_target_pips") or trade.get("post_sl_max_profit") or 0
     rev_target_r = round(float(rev_target) / risk_pips_safe, 2)
-    passed_1r = trade.get("review_passed_1r", trade.get("passed_1r", False))
+    passed_1r = trade.get("passed_1r", False)
     fr_possible = trade.get("free_risk_was_possible", False)
     fr_done = trade.get("review_free_risk_saved", False)
     pullback = trade.get("review_pullback", trade.get("pullback_after_1r", False))
@@ -1162,10 +1135,14 @@ def analyze_trade(trade_id):
 @app.route("/api/overall-analysis", methods=["GET"])
 def overall_analysis():
     custom_prompt = request.args.get("custom_prompt","").strip()
+    sym_filter = request.args.get("sym_filter","").strip().upper()
     trades = load_journal()
     closed = [t for t in trades if t.get("status") == "closed" and t.get("outcome") in ("win", "loss")]
+    if sym_filter:
+        closed = [t for t in closed if t.get("sym","").upper() == sym_filter]
     if not closed:
-        return jsonify({"ok": False, "error": "هیچ ترید بسته‌ای وجود ندارد"}), 404
+        err = f"هیچ ترید بسته‌ای برای نماد {sym_filter} وجود ندارد" if sym_filter else "هیچ ترید بسته‌ای وجود ندارد"
+        return jsonify({"ok": False, "error": err}), 404
     total = len(closed)
     wins = sum(1 for t in closed if t.get("outcome") == "win")
     losses = total - wins
@@ -1214,9 +1191,22 @@ def overall_analysis():
         exit_px = t.get("exit")
         outcome = t["outcome"]
         direction = t["direction"]
-        pnl = t.get("pnl", 0) or 0
-        mfe_pip = float(t.get("review_mfe") or t.get("mfe_pip") or 0)
-        mae_pip = float(t.get("review_mae") or t.get("mae_pip") or 0)
+        risk_pips = None
+        if sl_px and entry:
+            risk_pips = abs(float(entry) - float(sl_px)) * mul
+        has_valid_risk = risk_pips and risk_pips > 0
+
+        # MFE نهایی: اولویت با review_mfe (دستی) سپس mfe_pip خودکار
+        mfe_pip = float(t.get("review_mfe") if t.get("review_mfe") is not None else t.get("mfe_pip", 0))
+        mae_pip = float(t.get("review_mae") if t.get("review_mae") is not None else t.get("mae_pip", 0))
+        # بازتعیین passed_1r بر اساس MFE نهایی
+        passed_1r_effective = (has_valid_risk and mfe_pip >= risk_pips) or (t.get("passed_1r", False) and t.get("review_mfe") is None)
+        # اگر MFE دستی داریم و مقدار آن کمتر از ریسک است، passed_1r باید False شود
+        if t.get("review_mfe") is not None and has_valid_risk:
+            passed_1r_effective = mfe_pip >= risk_pips
+        free_risk_possible = passed_1r_effective
+        free_risk_saved_flag = t.get("review_free_risk_saved", False)
+
         post_sl_1r = t.get("post_sl_reached_1r", False)
         post_sl_1_5r = t.get("post_sl_reached_1_5r", False)
         post_sl_2r = t.get("post_sl_reached_2r", False)
@@ -1224,201 +1214,187 @@ def overall_analysis():
         post_sl_max = float(t.get("post_sl_max_profit", 0) or 0)
         rev_occurred = t.get("review_reversal_occurred", False)
         rev_target_pips = t.get("review_reversal_target_pips")
-        fr_possible = t.get("free_risk_was_possible", False)
-        passed_1r = t.get("passed_1r", False)
-        found_3r = t.get("found_3r", False)
         entry_time = t.get("entryTime", "")
-        free_risk_done = t.get("review_free_risk_saved", False)
-        note_text = t.get("note", "")
-        review_note_text = t.get("review_note", "")
+        free_risk_done_flag = t.get("review_free_risk_saved", False)
 
-        risk_pips = None
-        if sl_px and entry:
-            if direction == "BUY":
-                risk_pips = (entry - sl_px) * mul
-            else:
-                risk_pips = (sl_px - entry) * mul
-        risk_pips_safe = risk_pips if (risk_pips and risk_pips > 0) else 1.0
-        taken_pips = abs(float(exit_px) - entry) * mul if exit_px else 0
-        taken_r = round(taken_pips / risk_pips_safe, 2)
-        mfe_r = round(mfe_pip / risk_pips_safe, 2)
-        left_pip = round(mfe_pip - taken_pips, 1) if mfe_pip > taken_pips else 0
-        left_r = round(left_pip / risk_pips_safe, 2)
+        taken_r = 0.0
+        mfe_r = 0.0
+        mae_r = 0.0
+        left_r = 0.0
+        if has_valid_risk:
+            if exit_px:
+                raw_pips = (float(exit_px) - entry) if direction == "BUY" else (entry - float(exit_px))
+                taken_r = round(raw_pips * mul / risk_pips, 2)
+            mfe_r  = round(mfe_pip  / risk_pips, 2) if mfe_pip > 0 else 0
+            mae_r  = round(mae_pip  / risk_pips, 2) if mae_pip > 0 else 0
+            taken_abs_r = abs(taken_r)
+            left_r = round(mfe_r - taken_abs_r, 2) if (outcome == "win" and mfe_r > taken_abs_r) else 0.0
         exit_type = t.get("exit_type") or calc_exit_type(
-            outcome, risk_pips,
-            float(t.get("review_mfe") or t.get("mfe_pip") or 0),
-            t.get("found_3r", False)
+            outcome, risk_pips, mfe_pip, t.get("found_3r", False)
         )
         exit_type_label = {"sl": "SL", "tp": "TP(زودخروج)", "tp3": "3R(کامل)"}.get(exit_type, exit_type)
-
-        if taken_pips > 0: taken_r_list.append(taken_r)
-        if mfe_pip > 0: mfe_r_list.append(mfe_r)
-        if mae_pip and risk_pips_safe:
-            mae_ratio_list.append(round(mae_pip / risk_pips_safe, 2))
+        if has_valid_risk:
+            taken_r_list.append(taken_r)
+            if mfe_pip > 0: mfe_r_list.append(mfe_r)
+            if mae_pip > 0: mae_ratio_list.append(mae_r)
 
         tp_px = t.get("tp_price")
         planned_rr = None
-        if risk_pips_safe and tp_px and entry:
+        if has_valid_risk and tp_px and entry:
             tp_dist = abs(float(tp_px) - entry) * mul
-            planned_rr = round(tp_dist / risk_pips_safe, 2)
-            planned_rr_list.append(planned_rr)
-            rr_gap_list.append(round(taken_r - planned_rr, 2))
-        if planned_rr:
-            bkt = "<1.5" if planned_rr<1.5 else "1.5-2" if planned_rr<2 else "2-3" if planned_rr<3 else "3+"
-            if outcome=="win": rr_bucket[bkt]["w"]+=1
-            else: rr_bucket[bkt]["l"]+=1
+            planned_rr = round(tp_dist / risk_pips, 2)
+            if 0.5 <= planned_rr <= 10:
+                planned_rr_list.append(planned_rr)
+                rr_gap_list.append(round(abs(taken_r) - planned_rr, 2))
+        if planned_rr and 0.5 <= planned_rr <= 10:
+            bkt = "<1.5" if planned_rr < 1.5 else "1.5-2" if planned_rr < 2 else "2-3" if planned_rr < 3 else "3+"
+            if outcome == "win": rr_bucket[bkt]["w"] += 1
+            else: rr_bucket[bkt]["l"] += 1
 
-        stype = (t.get("setup_type","") or "نامشخص").strip()
-        setup_stats.setdefault(stype,{"w":0,"l":0,"pnl":0})
-        if outcome=="win": setup_stats[stype]["w"]+=1
-        else: setup_stats[stype]["l"]+=1
-        setup_stats[stype]["pnl"]+=pnl
+        stype = (t.get("setup_type") or "").strip()
+        if stype:
+            setup_stats.setdefault(stype, {"w": 0, "l": 0, "r": 0.0})
+            if outcome == "win": setup_stats[stype]["w"] += 1
+            else: setup_stats[stype]["l"] += 1
+            if has_valid_risk: setup_stats[stype]["r"] += taken_r
 
-        display_num = len(closed) - idx_t
-        sl_pips_show = round(risk_pips, 1) if risk_pips else None
-        tp_pips_show = round(abs(float(t.get("tp_price",0) or 0) - entry) * mul, 1) if t.get("tp_price") and entry else None
-        entry_time_short = str(t.get("entryTime",""))[:16]
-        is_manual_mfe = t.get("review_mfe") is not None
-        tshort = {
-            "idx": display_num, "tid": t["id"], "sym": sym, "dir": direction,
-            "tf": t.get("tf",""), "outcome": outcome, "entry": entry,
-            "exit": float(t.get("exit") or 0), "sl_price": t.get("sl_price"),
-            "tp_price": t.get("tp_price"), "sl_pips": sl_pips_show,
-            "tp_pips": tp_pips_show, "taken_r": taken_r, "mfe_r": mfe_r,
-            "left_r": left_r, "entry_time": entry_time_short,
-            "is_manual": is_manual_mfe, "note": (t.get("note") or "")[:80],
-        }
-        if outcome=="win":
-            if mfe_r>=1.0 or t.get("passed_1r"):
-                detail_1r.append({**tshort,"detail":f"MFE={mfe_pip:.0f}p taken={taken_r:.1f}R SL={sl_pips_show}p",
-                    "extra": {"mfe_r": mfe_r, "taken_r": taken_r, "left_r": left_r, "is_manual": is_manual_mfe}})
-            if mfe_r>=2.0:
-                detail_2r.append({**tshort,"detail":f"MFE={mfe_pip:.0f}p taken={taken_r:.1f}R",
-                    "extra": {"mfe_r": mfe_r, "taken_r": taken_r}})
-            if t.get("found_3r") or mfe_r>=3.0:
-                detail_3r.append({**tshort,"detail":f"MFE={mfe_pip:.0f}p taken={taken_r:.1f}R",
-                    "extra": {"mfe_r": mfe_r}})
-            if left_r>0.4:
-                detail_early.append({**tshort,"detail":f"taken={taken_r:.1f}R | MFE={mfe_pip:.0f}p | {left_r:.1f}R جا موند",
-                    "extra": {"taken_r": taken_r, "mfe_r": mfe_r, "left_r": left_r}})
-        else:
-            mbe = float(t.get("review_mfe") or t.get("mfe_before_sl_pip") or 0)
-            mbe_r = round(mbe / risk_pips_safe, 2)
-            if mbe >= (risk_pips or 0) and risk_pips:
-                detail_1r.append({**tshort,"detail":f"MFE قبل SL={mbe:.0f}p ({mbe_r:.1f}R) SL={sl_pips_show}p",
-                    "extra": {"mbe_r": mbe_r, "mfe_before_sl": mbe}})
-            psl_manual = t.get("review_reversal_target_pips")
-            psl_auto = float(t.get("post_sl_max_profit",0) or 0)
-            psl = float(psl_manual) if psl_manual is not None else psl_auto
-            psl_r = round(psl / risk_pips_safe, 2)
-            rev_manual = t.get("review_reversal_occurred")
-            rev_auto = t.get("post_sl_reached_1r", False)
-            if rev_manual is True or (rev_manual is None and rev_auto):
-                lvls = []
-                if t.get("review_reversal_occurred") and psl_r >= 1.5: lvls.append("→1.5R")
-                if t.get("review_reversal_occurred") and psl_r >= 2.0: lvls.append("→2R")
-                if t.get("review_reversal_occurred") and psl_r >= 3.0: lvls.append("→3R")
-                if not t.get("review_reversal_occurred"):
-                    if t.get("post_sl_reached_1_5r"): lvls.append("→1.5R")
-                    if t.get("post_sl_reached_2r"): lvls.append("→2R")
-                    if t.get("post_sl_reached_3r"): lvls.append("→3R")
-                lvl_str = " ".join(lvls)
-                from_sl = t.get("review_reversal_from_sl")
-                from_sl_str = f" از {from_sl:.0f}p بعد SL" if from_sl else ""
-                detail_sl_rev.append({**tshort,
-                    "detail":f"برگشت={psl:.0f}p ({psl_r:.1f}R){lvl_str}{from_sl_str}",
-                    "extra": {"psl_r": psl_r, "psl_pips": psl, "is_manual": rev_manual is True, "from_sl": from_sl}})
-                post_sl_pip_list.append(psl)
-
-        mfe_bsl_pip = float(t.get("mfe_before_sl_pip", 0))
-        mfe_bsl_r = mfe_bsl_pip / risk_pips_safe if outcome == "loss" else 0.0
-
-        if outcome == "win":
-            if mfe_r >= 1.0 or passed_1r: reached_1r_count += 1
-            if mfe_r >= 1.5: reached_1_5r_count += 1
-            if mfe_r >= 2.0: reached_2r_count += 1
-            if found_3r or mfe_r >= 3.0: reached_3r_count += 1
-        else:
-            if rev_occurred and rev_target_pips is not None:
-                rev_r = rev_target_pips / risk_pips_safe
-                if rev_target_pips == 0:
-                    rev_occurred = False
-                else:
-                    if rev_r >= 1.0: reached_1r_count += 1
-                    if rev_r >= 1.5: reached_1_5r_count += 1
-                    if rev_r >= 2.0: reached_2r_count += 1
-                    if rev_r >= 3.0: reached_3r_count += 1
-                    sl_reversed_count += 1
-                    if rev_r >= 1.0: sl_reversed_1r += 1
-                    if rev_r >= 1.5: sl_reversed_1_5r += 1
-                    if rev_r >= 2.0: sl_reversed_2r += 1
-                    if rev_r >= 3.0: sl_reversed_3r += 1
-            else:
-                if mfe_bsl_r >= 1.0 or post_sl_1r: reached_1r_count += 1
-                if mfe_bsl_r >= 1.5 or post_sl_1_5r: reached_1_5r_count += 1
-                if mfe_bsl_r >= 2.0 or post_sl_2r: reached_2r_count += 1
-                if found_3r or post_sl_3r: reached_3r_count += 1
-                if post_sl_1r and not rev_occurred:
-                    sl_reversed_count += 1
-                    sl_reversed_1r += 1
-                if post_sl_1_5r and not rev_occurred: sl_reversed_1_5r += 1
-                if post_sl_2r and not rev_occurred: sl_reversed_2r += 1
-                if post_sl_3r and not rev_occurred: sl_reversed_3r += 1
-
-        sym_stats[sym] = sym_stats.get(sym, {"wins": 0, "losses": 0, "pnl": 0})
-        if outcome == "win":
-            sym_stats[sym]["wins"] += 1
-        else:
-            sym_stats[sym]["losses"] += 1
-        sym_stats[sym]["pnl"] += pnl
+        sym_stats.setdefault(sym, {"wins": 0, "losses": 0, "total_r": 0.0})
+        if outcome == "win": sym_stats[sym]["wins"] += 1
+        else: sym_stats[sym]["losses"] += 1
+        if has_valid_risk: sym_stats[sym]["total_r"] += taken_r
 
         try:
             et = str(entry_time).replace("T", " ").strip()
             if len(et) >= 13:
                 hour = int(et[11:13])
                 if 0 <= hour <= 23:
-                    hour_stats[hour] = hour_stats.get(hour, {"wins": 0, "losses": 0})
-                    if outcome == "win":
-                        hour_stats[hour]["wins"] += 1
-                    else:
-                        hour_stats[hour]["losses"] += 1
-        except:
-            pass
+                    hour_stats.setdefault(hour, {"wins": 0, "losses": 0})
+                    if outcome == "win": hour_stats[hour]["wins"] += 1
+                    else: hour_stats[hour]["losses"] += 1
+        except: pass
 
-        if outcome == "win" and left_r > 0.4:
-            early_exit_count += 1
-            early_exit_left_r_list.append(left_r)
+        display_num = len(closed) - idx_t
+        sl_r_show  = f"{risk_pips:.1f}p({1:.0f}R)" if has_valid_risk else "—"
+        tp_r_show  = f"{planned_rr:.2f}R" if planned_rr else "—"
+        entry_time_short = str(t.get("entryTime", ""))[:16]
+        is_manual_mfe = t.get("review_mfe") is not None
+
+        tshort = {
+            "idx": display_num, "tid": t["id"], "sym": sym, "dir": direction,
+            "tf": t.get("tf", ""), "outcome": outcome, "entry": entry,
+            "exit": float(t.get("exit") or 0), "sl_price": t.get("sl_price"),
+            "tp_price": t.get("tp_price"),
+            "sl_pips": round(risk_pips, 1) if has_valid_risk else None,
+            "tp_pips": round(abs(float(tp_px or 0) - entry) * mul, 1) if tp_px else None,
+            "taken_r": taken_r, "mfe_r": mfe_r, "left_r": left_r,
+            "entry_time": entry_time_short, "is_manual": is_manual_mfe,
+            "note": (t.get("note") or "")[:80],
+        }
+
+        if outcome == "win":
+            if has_valid_risk:
+                if mfe_r >= 1.0 or passed_1r_effective:
+                    reached_1r_count += 1
+                    detail_1r.append({**tshort, "detail": f"MFE={mfe_r:.2f}R taken={taken_r:.2f}R",
+                        "extra": {"mfe_r": mfe_r, "taken_r": taken_r, "left_r": left_r, "is_manual": is_manual_mfe}})
+                if mfe_r >= 1.5: reached_1_5r_count += 1
+                if mfe_r >= 2.0:
+                    reached_2r_count += 1
+                    detail_2r.append({**tshort, "detail": f"MFE={mfe_r:.2f}R taken={taken_r:.2f}R",
+                        "extra": {"mfe_r": mfe_r, "taken_r": taken_r}})
+                if t.get("found_3r") or mfe_r >= 3.0:
+                    reached_3r_count += 1
+                    detail_3r.append({**tshort, "detail": f"MFE={mfe_r:.2f}R taken={taken_r:.2f}R",
+                        "extra": {"mfe_r": mfe_r}})
+                if left_r > 0.3:
+                    early_exit_count += 1
+                    early_exit_left_r_list.append(left_r)
+                    detail_early.append({**tshort,
+                        "detail": f"taken={taken_r:.2f}R | MFE={mfe_r:.2f}R | {left_r:.2f}R جا موند",
+                        "extra": {"taken_r": taken_r, "mfe_r": mfe_r, "left_r": left_r}})
+        else:
+            mbe_pip = float(t.get("review_mfe") or t.get("mfe_before_sl_pip") or 0)
+            mbe_r = round(mbe_pip / risk_pips, 2) if has_valid_risk else 0.0
+            psl_manual = t.get("review_reversal_target_pips")
+            psl_auto = post_sl_max
+            psl_pips = float(psl_manual) if psl_manual is not None else psl_auto
+            psl_r = round(psl_pips / risk_pips, 2) if (has_valid_risk and psl_pips > 0) else 0.0
+            rev_manual = t.get("review_reversal_occurred")
+            rev_auto_1r = post_sl_1r
+            if has_valid_risk and mbe_r >= 1.0:
+                detail_1r.append({**tshort,
+                    "detail": f"MFE قبل SL={mbe_r:.2f}R",
+                    "extra": {"mbe_r": mbe_r}})
+            actual_rev = rev_manual is True or (rev_manual is None and rev_auto_1r)
+            if actual_rev and psl_r > 0:
+                sl_reversed_count += 1
+                if psl_r >= 1.0:
+                    sl_reversed_1r += 1
+                    reached_1r_count += 1
+                if psl_r >= 1.5:
+                    sl_reversed_1_5r += 1
+                    reached_1_5r_count += 1
+                if psl_r >= 2.0:
+                    sl_reversed_2r += 1
+                    reached_2r_count += 1
+                if psl_r >= 3.0:
+                    sl_reversed_3r += 1
+                    reached_3r_count += 1
+                lvls = []
+                if psl_r >= 1.0: lvls.append("→1R")
+                if psl_r >= 1.5: lvls.append("→1.5R")
+                if psl_r >= 2.0: lvls.append("→2R")
+                if psl_r >= 3.0: lvls.append("→3R")
+                from_sl = t.get("review_reversal_from_sl")
+                from_sl_r = round(float(from_sl) / risk_pips, 2) if (from_sl and has_valid_risk) else None
+                from_sl_str = f" از {from_sl_r:.2f}R بعد SL" if from_sl_r else ""
+                detail_sl_rev.append({**tshort,
+                    "detail": f"برگشت={psl_r:.2f}R {' '.join(lvls)}{from_sl_str}",
+                    "extra": {"psl_r": psl_r, "is_manual": rev_manual is True, "from_sl_r": from_sl_r}})
+                post_sl_pip_list.append(psl_r)
+            elif not actual_rev:
+                if post_sl_1r:
+                    sl_reversed_count += 1
+                    sl_reversed_1r += 1
+                    reached_1r_count += 1
+                if post_sl_1_5r:
+                    sl_reversed_1_5r += 1
+                    reached_1_5r_count += 1
+                if post_sl_2r:
+                    sl_reversed_2r += 1
+                    reached_2r_count += 1
+                if post_sl_3r:
+                    sl_reversed_3r += 1
+                    reached_3r_count += 1
+                if post_sl_1r:
+                    psl_r_auto = round(post_sl_max / risk_pips, 2) if has_valid_risk else 0
+                    detail_sl_rev.append({**tshort,
+                        "detail": f"برگشت سیستمی={psl_r_auto:.2f}R",
+                        "extra": {"psl_r": psl_r_auto, "is_manual": False, "from_sl_r": None}})
+                    post_sl_pip_list.append(psl_r_auto)
 
         if outcome == "loss":
-            if free_risk_done:
+            if free_risk_done_flag:
                 free_risk_done_count += 1
-                detail_fr_done.append({**tshort, "detail": f"SL={sl_pips_show}p | ورود: {entry_time_short}"})
-            elif fr_possible:
+                detail_fr_done.append({**tshort, "detail": f"SL={round(risk_pips,1) if has_valid_risk else '—'}p | {entry_time_short}"})
+            elif free_risk_possible:
                 fr_missed_count += 1
-                detail_fr_missed.append({**tshort, "detail": f"SL={sl_pips_show}p | ورود: {entry_time_short}"})
+                detail_fr_missed.append({**tshort, "detail": f"SL={round(risk_pips,1) if has_valid_risk else '—'}p | {entry_time_short}"})
 
-        mfe_r_str = f"{mfe_r:.2f}R" if mfe_r else "—"
-        mae_r_str = f"{round(mae_pip/risk_pips_safe,2):.2f}R" if mae_pip else "—"
-        mfe_bsl_str = f"{mfe_bsl_r:.2f}R" if mfe_bsl_r else "—"
-        fr_str = "فری‌ریسک✓" if free_risk_done else ("فری‌ریسک✗(ممکن)" if fr_possible else "")
+        mfe_r_str  = f"{mfe_r:.2f}R"  if (has_valid_risk and mfe_r)  else "—"
+        mae_r_str  = f"{mae_r:.2f}R"  if (has_valid_risk and mae_r)  else "—"
+        mbe_r_str  = f"{mbe_r:.2f}R"  if (outcome == "loss" and has_valid_risk and mbe_r > 0) else "—"
+        fr_str = "فری‌ریسک✓" if free_risk_done_flag else ("فری‌ریسک✗(ممکن)" if free_risk_possible else "")
         pb_str = "pullback✓" if t.get("review_pullback") else ""
-        rev_str = ""
-        if outcome == "loss":
-            if t.get("review_reversal_occurred"):
-                rev_val = float(t.get("review_reversal_target_pips",0) or 0) / risk_pips_safe
-                rev_str = f"برگشتSL:{rev_val:.1f}R" if rev_val else "برگشتSL✓"
-            elif post_sl_1r:
-                rev_val = post_sl_max / risk_pips_safe if post_sl_max else 0
-                rev_str = f"برگشتSL:{rev_val:.1f}R" if rev_val else "برگشتSL✓"
         note_short = (t.get("review_note") or t.get("note") or "")[:60]
+        risk_r_show = f"SL={round(risk_pips,1) if has_valid_risk else '?'}p(1R) TP={tp_r_show}"
         detail_parts = [
             f"{sym}/{t.get('tf','?')} {direction}:{outcome}({exit_type_label})",
-            f"entry={entry:.5g} SL={sl_pips_show}p TP={tp_pips_show}p",
-            f"taken={taken_r:.2f}R MFE={mfe_r_str} MAE={mae_r_str}",
+            risk_r_show,
+            f"taken={taken_r:+.2f}R MFE={mfe_r_str} MAE={mae_r_str}",
         ]
-        if outcome == "loss":
-            detail_parts.append(f"MFEbeforeSL={mfe_bsl_str}")
-        if rev_str: detail_parts.append(rev_str)
+        if outcome == "loss" and mbe_r > 0:
+            detail_parts.append(f"MFEbeforeSL={mbe_r_str}")
         if fr_str: detail_parts.append(fr_str)
         if pb_str: detail_parts.append(pb_str)
         if note_short: detail_parts.append(f"note:{note_short}")
@@ -1428,19 +1404,27 @@ def overall_analysis():
     avg_mfe_r = round(sum(mfe_r_list)/len(mfe_r_list), 2) if mfe_r_list else 0
     avg_planned_rr = round(sum(planned_rr_list)/len(planned_rr_list),2) if planned_rr_list else 0
     avg_rr_gap = round(sum(rr_gap_list)/len(rr_gap_list),2) if rr_gap_list else 0
-    avg_post_sl_pip = round(sum(post_sl_pip_list)/len(post_sl_pip_list),1) if post_sl_pip_list else 0
-    rr_bucket_lines = [f"R/R {b}: {round(v['w']/(v['w']+v['l'])*100)}% برد ({v['w']}/{v['w']+v['l']})" for b,v in rr_bucket.items() if v['w']+v['l']>0]
-    setup_lines = [f"{st}: {round(v['w']/(v['w']+v['l'])*100)}% برد ({v['w']}/{v['w']+v['l']}) P&L:{v['pnl']:.1f}$" for st,v in sorted(setup_stats.items(),key=lambda x:-(x[1]['w']+x[1]['l'])) if v['w']+v['l']>0]
+    avg_post_sl_r = round(sum(post_sl_pip_list)/len(post_sl_pip_list),2) if post_sl_pip_list else 0
+    rr_bucket_lines = [
+        f"R/R {b}: {round(v['w']/(v['w']+v['l'])*100)}% برد ({v['w']}/{v['w']+v['l']})"
+        for b,v in rr_bucket.items() if v['w']+v['l']>0
+    ]
+    setup_lines = [
+        f"{st}: {round(v['w']/(v['w']+v['l'])*100)}% برد ({v['w']}/{v['w']+v['l']}) R:{v['r']:+.2f}R"
+        for st,v in sorted(setup_stats.items(), key=lambda x:-(x[1]['w']+x[1]['l']))
+        if v['w']+v['l']>0 and st
+    ]
     trade_detail_data = {
         "r1": detail_1r, "r2": detail_2r, "r3": detail_3r,
         "sl_rev": detail_sl_rev, "early": detail_early,
         "fr_missed": detail_fr_missed, "fr_done": detail_fr_done,
-        "avg_post_sl_pip": avg_post_sl_pip
+        "avg_post_sl_r": avg_post_sl_r
     }
     avg_early_r = round(sum(early_exit_left_r_list)/len(early_exit_left_r_list), 2) if early_exit_left_r_list else 0
     avg_mae_r = round(sum(mae_ratio_list)/len(mae_ratio_list), 2) if mae_ratio_list else 0
-    best_sym = max(sym_stats, key=lambda s: sym_stats[s]["pnl"]) if sym_stats else "—"
-    worst_sym = min(sym_stats, key=lambda s: sym_stats[s]["pnl"]) if sym_stats else "—"
+
+    best_sym = max(sym_stats, key=lambda s: sym_stats[s]["total_r"]) if sym_stats else "—"
+    worst_sym = min(sym_stats, key=lambda s: sym_stats[s]["total_r"]) if sym_stats else "—"
     best_hour = worst_hour = "—"
     if hour_stats:
         def hour_wr(h):
@@ -1453,7 +1437,7 @@ def overall_analysis():
     for s, v in sym_stats.items():
         tot = v["wins"] + v["losses"]
         wr_s = round(v["wins"]/tot*100) if tot else 0
-        sym_lines.append(f"{s}: {wr_s}% برد ({v['wins']}/{tot}) | P&L: {v['pnl']:.1f}$")
+        sym_lines.append(f"{s}: {wr_s}% برد ({v['wins']}/{tot}) | R:{v['total_r']:+.2f}R")
     numeric = {
         "total": total, "wins": wins, "losses": losses, "winrate": wr,
         "win_tp_count": win_tp_count, "win_3r_count": win_3r_count,
@@ -1475,50 +1459,51 @@ def overall_analysis():
         "rr_bucket_lines": rr_bucket_lines, "setup_lines": setup_lines,
         "trade_detail_data": trade_detail_data,
     }
+    no_sl_count = total - len(taken_r_list)
+    sym_note = f"\n🔍 فیلتر نماد: فقط {sym_filter} | " if sym_filter else ""
     prompt = (
-        f"تو یک تحلیلگر حرفه‌ای داده ترید هستی. فقط بر اساس اعداد زیر تحلیل کن.\n\n"
+        f"تو یک تحلیلگر حرفه‌ای داده ترید هستی. فقط بر اساس اعداد زیر تحلیل کن.{sym_note}\n"
+        f"⚠️ همه اعداد R-based هستند (1R = ریسک هر ترید). پیپ استفاده نکن.\n\n"
         f"=== آمار کلی ===\n"
         f"تعداد: {total} | برد: {wins} | باخت: {losses} | نرخ برد: {wr}%\n"
-        f"بردها: {win_3r_count} تا 3R کامل | {win_tp_count} تا زودخروج با TP (قبل از 3R)\n"
-        f"میانگین R گرفته‌شده: {avg_taken_r}R | میانگین MFE: {avg_mfe_r}R\n"
-        f"میانگین MAE: {avg_mae_r}R\n\n"
-        f"=== رسیدن به سطوح ریوارد (بدون توجه به خروج) ===\n"
-        f"رسیدن به 1R: {reached_1r_count} از {total} ترید\n"
-        f"رسیدن به 1.5R: {reached_1_5r_count} از {total} ترید\n"
-        f"رسیدن به 2R: {reached_2r_count} از {total} ترید\n"
-        f"رسیدن به 3R: {reached_3r_count} از {total} ترید\n\n"
+        f"{'⚠️ '+str(no_sl_count)+' ترید بدون SL (از محاسبات R حذف شدند) | ' if no_sl_count else ''}"
+        f"بردها: {win_3r_count} تا 3R کامل | {win_tp_count} تا زودخروج\n"
+        f"میانگین R گرفته (برد مثبت/باخت منفی): {avg_taken_r:+.2f}R | میانگین MFE: {avg_mfe_r:.2f}R\n"
+        f"میانگین MAE: {avg_mae_r:.2f}R\n\n"
+        f"=== رسیدن به سطوح ریوارد ===\n"
+        f"1R: {reached_1r_count}/{total} | 1.5R: {reached_1_5r_count}/{total} | 2R: {reached_2r_count}/{total} | 3R: {reached_3r_count}/{total}\n\n"
         f"=== مدیریت معامله ===\n"
-        f"زود بستیم: {early_exit_count} تا (میانگین {avg_early_r}R روی میز موند)\n"
-        f"SL خورد و برگشت به 1R: {sl_reversed_1r} تا\n"
-        f"SL خورد و برگشت به 1.5R: {sl_reversed_1_5r} تا\n"
-        f"SL خورد و برگشت به 2R: {sl_reversed_2r} تا\n"
-        f"SL خورد و برگشت به 3R: {sl_reversed_3r} تا\n"
-        f"فری‌ریسک ممکن بود ولی SL خورد: {fr_missed_count} تا\n"
-        f"فری‌ریسک انجام شد: {free_risk_done_count} تا\n\n"
-        f"=== نمادها ===\n" + "\n".join(sym_lines) + f"\n\n"
+        f"زود بستیم: {early_exit_count} تا (میانگین {avg_early_r:.2f}R روی میز موند)\n"
+        f"SL خورد و برگشت — 1R:{sl_reversed_1r} | 1.5R:{sl_reversed_1_5r} | 2R:{sl_reversed_2r} | 3R:{sl_reversed_3r}\n"
+        f"میانگین برگشت بعد SL: {avg_post_sl_r:.2f}R\n"
+        f"فری‌ریسک ممکن بود ولی SL خورد: {fr_missed_count} | فری‌ریسک انجام شد: {free_risk_done_count}\n\n"
+        f"=== نمادها (R-based) ===\n" + "\n".join(sym_lines) + f"\n\n"
         f"=== ساعت: بهترین {best_hour} | بدترین {worst_hour} ===\n\n"
-        f"=== خلاصه تریدها (با یادداشت‌ها) ===\n" + "\n".join(trade_details[:20]) + f"\n\n"
+        f"=== خلاصه تریدها ===\n" + "\n".join(trade_details[:20]) + f"\n\n"
         f"گزارش فارسی بنویس (بدون مقدمه):\n"
         f"1. آمار کلی یک جمله\n"
         f"2. تحلیل سطوح ریوارد: چند درصد تریدها به 1R/2R/3R رسیدن\n"
-        f"3. مشکل استاپ: با توجه به داده‌های برگشت بعد SL (به‌ویژه {sl_reversed_1r} ترید برگشت به 1R، {sl_reversed_1_5r} به 1.5R، {sl_reversed_2r} به 2R، {sl_reversed_3r} به 3R)، پیشنهاد بده که استاپ لاس را چند پیپ (یا چه درصدی از ریسک فعلی) عریض‌تر کنیم تا از خوردن استاپ جلوگیری شود. همچنین اگر از ورود پله‌ای استفاده کنیم چه تأثیری دارد؟\n"
-        f"4. مشکل تارگت (زود بستن): با توجه به میانگین MFE ({avg_mfe_r}R) و میانگین R گرفته شده ({avg_taken_r}R)، پیشنهاد بده که تارگت را روی چه عددی (بر حسب R) تنظیم کنیم تا سود بیشتری جمع کنیم.\n"
-        f"5. تأثیر تایم فریم و ساعت ورود: بر اساس داده‌های ورود (ساعت {best_hour} بهترین و {worst_hour} بدترین)، پیشنهاد بده که در چه ساعاتی اصلاً معامله نکنیم. همچنین آیا تایم فریم خاصی (از داده‌های تریدها) نتایج بهتری داشته؟ اگر داده کافی نیست، بگو «اطلاعات کافی نیست».\n"
-        f"6. پیشنهاد عددی بهینه‌سازی: یک سناریوی شرطی بنویس که اگر استاپ را X% عریض‌تر کنیم (مثلاً {int((avg_mae_r+0.2)*100)}% یا عدد پیشنهادی خودت) و تارگت را روی {avg_mfe_r*0.85:.1f}R قرار دهیم، نرخ برد و میانگین R هر ترید چقدر می‌شود؟ (از روی داده‌ها تخمین بزن)\n"
-        f"7. بهترین نماد و ساعت برای تمرکز: ترکیب {best_sym} در ساعت {best_hour} را پیشنهاد بده.\n"
-        f"8. نمره کلی از 10 و جمع‌بندی نهایی.\n\n"
-        f"مهم: اعداد دقیق و واقعی بده، فرضی ننویس. اگر داده برای تخمین کافی نیست، بگو «داده کافی نیست»."
+        f"3. مشکل استاپ: {sl_reversed_1r} ترید بعد SL به 1R رسید ({sl_reversed_2r} به 2R، {sl_reversed_3r} به 3R). میانگین برگشت {avg_post_sl_r:.2f}R. پیشنهاد دقیق بده.\n"
+        f"4. مشکل تارگت: MFE میانگین {avg_mfe_r:.2f}R ولی گرفتیم {avg_taken_r:+.2f}R. تارگت بهینه پیشنهاد بده.\n"
+        f"5. بهترین/بدترین ساعت و نماد براساس R.\n"
+        f"6. نمره کلی از 10.\n\n"
+        f"مهم: اعداد دقیق، فرضی ننویس. همه R-based."
     )
     if custom_prompt:
-        data_block = (f"\n\n=== داده‌های آماری ===\nتعداد:{total}|برد:{wins}|باخت:{losses}|نرخ برد:{wr}%\n"
-            f"R گرفته:{avg_taken_r}R|MFE:{avg_mfe_r}R|MAE:{avg_mae_r}R\n"
-            f"R/R برنامه:{avg_planned_rr}|اختلاف:{avg_rr_gap:+.2f}R\nمیانگین پیپ برگشت بعد SL:{avg_post_sl_pip}\n"
+        data_block = (
+            f"\n\n=== داده‌های آماری (همه R-based) ===\n"
+            f"تعداد:{total}|برد:{wins}|باخت:{losses}|نرخ برد:{wr}%\n"
+            f"R گرفته:{avg_taken_r:+.2f}R|MFE:{avg_mfe_r:.2f}R|MAE:{avg_mae_r:.2f}R\n"
+            f"R/R برنامه:{avg_planned_rr}|اختلاف:{avg_rr_gap:+.2f}R\n"
+            f"میانگین برگشت بعد SL:{avg_post_sl_r:.2f}R\n"
             f"رسیدن 1R:{reached_1r_count}|2R:{reached_2r_count}|3R:{reached_3r_count}\n"
             f"SL برگشت 1R:{sl_reversed_1r}|2R:{sl_reversed_2r}|3R:{sl_reversed_3r}\n"
             f"فری‌ریسک ممکن:{fr_missed_count}|انجام شد:{free_risk_done_count}\n"
-            f"نرخ برد R/R:{' | '.join(rr_bucket_lines)}\nستاپ‌ها:{' | '.join(setup_lines[:4])}\n"
+            f"نرخ برد R/R:{' | '.join(rr_bucket_lines)}\n"
+            f"{'ستاپ‌ها:'+' | '.join(setup_lines[:4]) if setup_lines else 'ستاپ‌ها: وارد نشده'}\n"
             f"بهترین:{best_sym}|بدترین:{worst_sym}|بهترین ساعت:{best_hour}|بدترین:{worst_hour}\n"
-            f"خلاصه:\n"+"\n".join(trade_details[:15]))
+            f"خلاصه:\n" + "\n".join(trade_details[:15])
+        )
         final_prompt = custom_prompt + data_block
     else:
         final_prompt = prompt
@@ -1657,16 +1642,14 @@ def poll_open_trades():
                     tp3 = trade.get("tp_price")
                 try:
                     res = check_sltp_hit_with_details(sym, tf, trade["entryTime"], direction, entry, sl_price, None, 1.0, r3_override=tp3)
-                    (hit, hit_price, tp_hit, tp_hit_price, last_close, pnl, mfe_pip, mae_pip, candle_lines,
+                    (hit, hit_price, last_close, pnl, mfe_pip, mae_pip, candle_lines,
                      found_3r, fr_possible, fr_saved, fr_at, pullback,
                      post_max, post_1r, post_1_5r, post_2r, post_3r,
                      mfe_before_sl, passed_1r, snapshot_bars) = res
-                    trade["tp_hit"] = tp_hit
-                    trade["tp_hit_price"] = tp_hit_price
                     if hit:
                         trade["exit"] = hit_price
                         trade["exitTime"] = now_teh()
-                        trade["outcome"] = "win" if hit == "tp3" else "loss"
+                        trade["outcome"] = "win" if hit in ["tp", "tp3"] else "loss"
                         trade["exit_type"] = hit
                         trade["status"] = "closed"
                         trade["pending_check"] = False
@@ -1683,6 +1666,7 @@ def poll_open_trades():
                         trade["post_sl_reached_3r"] = post_3r
                         trade["mfe_before_sl_pip"] = round(mfe_before_sl, 1) if mfe_before_sl else 0
                         trade["passed_1r"] = passed_1r
+                        trade["exitNote"] = f"خودکار polling: {'3R' if hit=='tp3' else ('TP' if hit=='tp' else 'SL')}"
                         diff = (hit_price - entry) if direction == "BUY" else (entry - hit_price)
                         trade["pnl"] = round(diff, 4)
                         trade["candle_snapshot"] = snapshot_bars
